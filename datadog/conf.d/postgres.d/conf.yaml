@@ -1,0 +1,9 @@
+## PostgreSQL インテグレーション設定
+## Autodiscovery経由で設定されるため、このファイルはオプショナルです
+
+init_config:
+
+instances:
+  # Docker Composeのlabelsで設定されるため、通常は不要
+  # 必要に応じてここに追加設定を記述
+  []

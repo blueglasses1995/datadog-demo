@@ -1,0 +1,169 @@
+version: '3.8'
+
+services:
+  # Datadog Agent - 統合監視エージェント
+  datadog-agent:
+    image: gcr.io/datadoghq/agent:7
+    container_name: datadog-agent
+    restart: unless-stopped
+    environment:
+      - DD_API_KEY=${DD_API_KEY}
+      - DD_SITE=${DD_SITE:-datadoghq.com}
+      - DD_ENV=${DD_ENV:-dev}
+      - DD_SERVICE=${DD_SERVICE:-datadog-demo}
+      - DD_VERSION=${DD_VERSION:-1.0.0}
+      # APM設定
+      - DD_APM_ENABLED=true
+      - DD_APM_NON_LOCAL_TRAFFIC=true
+      # ログ収集設定
+      - DD_LOGS_ENABLED=true
+      - DD_LOGS_CONFIG_CONTAINER_COLLECT_ALL=true
+      # プロセス監視
+      - DD_PROCESS_AGENT_ENABLED=true
+      # Docker監視
+      - DD_CONTAINER_EXCLUDE=""
+      # インテグレーション
+      - DD_AC_EXCLUDE=""
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /proc/:/host/proc/:ro
+      - /sys/fs/cgroup/:/host/sys/fs/cgroup:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - ./datadog/conf.d:/etc/datadog-agent/conf.d:ro
+    ports:
+      - "8126:8126"  # APM
+    networks:
+      - datadog-demo
+
+  # PostgreSQL - データベース
+  postgres:
+    image: postgres:15-alpine
+    container_name: postgres
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER:-demo_user}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-demo_password}
+      - POSTGRES_DB=${POSTGRES_DB:-demo_db}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./backend/init.sql:/docker-entrypoint-initdb.d/init.sql
+    ports:
+      - "5432:5432"
+    networks:
+      - datadog-demo
+    labels:
+      com.datadoghq.ad.check_names: '["postgres"]'
+      com.datadoghq.ad.init_configs: '[{}]'
+      com.datadoghq.ad.instances: '[{"host":"%%host%%", "port":5432,"username":"demo_user","password":"demo_password"}]'
+      com.datadoghq.ad.logs: '[{"source": "postgresql", "service": "postgres"}]'
+
+  # Redis - キャッシュ
+  redis:
+    image: redis:7-alpine
+    container_name: redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6379:6379"
+    networks:
+      - datadog-demo
+    labels:
+      com.datadoghq.ad.check_names: '["redisdb"]'
+      com.datadoghq.ad.init_configs: '[{}]'
+      com.datadoghq.ad.instances: '[{"host":"%%host%%","port":6379}]'
+      com.datadoghq.ad.logs: '[{"source": "redis", "service": "redis"}]'
+
+  # Backend API - Flask
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: backend
+    restart: unless-stopped
+    environment:
+      - DD_AGENT_HOST=datadog-agent
+      - DD_TRACE_AGENT_PORT=8126
+      - DD_ENV=${DD_ENV:-dev}
+      - DD_SERVICE=backend-api
+      - DD_VERSION=${DD_VERSION:-1.0.0}
+      - DD_LOGS_INJECTION=true
+      - DD_TRACE_SAMPLE_RATE=1
+      - DD_PROFILING_ENABLED=true
+      - FLASK_ENV=${FLASK_ENV:-development}
+      - POSTGRES_HOST=postgres
+      - POSTGRES_USER=${POSTGRES_USER:-demo_user}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-demo_password}
+      - POSTGRES_DB=${POSTGRES_DB:-demo_db}
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+    volumes:
+      - ./backend:/app
+    ports:
+      - "5000:5000"
+    depends_on:
+      - postgres
+      - redis
+      - datadog-agent
+    networks:
+      - datadog-demo
+    labels:
+      com.datadoghq.ad.logs: '[{"source": "python", "service": "backend-api"}]'
+
+  # Frontend - React
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: frontend
+    restart: unless-stopped
+    environment:
+      - REACT_APP_API_URL=http://localhost:80/api
+      - REACT_APP_DD_RUM_APPLICATION_ID=${REACT_APP_DD_RUM_APPLICATION_ID}
+      - REACT_APP_DD_RUM_CLIENT_TOKEN=${REACT_APP_DD_RUM_CLIENT_TOKEN}
+      - REACT_APP_DD_RUM_SITE=${REACT_APP_DD_RUM_SITE:-datadoghq.com}
+      - REACT_APP_DD_RUM_SERVICE=frontend
+      - REACT_APP_DD_RUM_ENV=${DD_ENV:-dev}
+    volumes:
+      - ./frontend/src:/app/src
+      - ./frontend/public:/app/public
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
+    networks:
+      - datadog-demo
+    labels:
+      com.datadoghq.ad.logs: '[{"source": "react", "service": "frontend"}]'
+
+  # Nginx - リバースプロキシ
+  nginx:
+    build:
+      context: ./nginx
+      dockerfile: Dockerfile
+    container_name: nginx
+    restart: unless-stopped
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/logs:/var/log/nginx
+    ports:
+      - "80:80"
+    depends_on:
+      - frontend
+      - backend
+    networks:
+      - datadog-demo
+    labels:
+      com.datadoghq.ad.check_names: '["nginx"]'
+      com.datadoghq.ad.init_configs: '[{}]'
+      com.datadoghq.ad.instances: '[{"nginx_status_url": "http://%%host%%:%%port%%/nginx_status/"}]'
+      com.datadoghq.ad.logs: '[{"source": "nginx", "service": "nginx", "log_processing_rules": [{"type": "multi_line", "name": "new_log_start_with_date", "pattern": "\\d{4}[/\\-]\\d{2}[/\\-]\\d{2}"}]}]'
+
+networks:
+  datadog-demo:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  redis_data:
